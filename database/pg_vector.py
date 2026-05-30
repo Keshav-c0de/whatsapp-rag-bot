@@ -35,8 +35,6 @@ class SupabaseVectorDB:
         If the Supabase client isn't configured, return an empty list so callers
         can handle the "I don't know" path gracefully.
         """
-        if not self.client:
-            return []
 
         try:
             # This is intentionally generic: different schemas or Supabase setups
