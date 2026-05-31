@@ -1,67 +1,78 @@
 import os
 from typing import List, Dict
+from dotenv import load_dotenv
+import psycopg
+from psycopg import sql
+from psycopg.rows import dict_row
 
+load_dotenv()
+
+host = os.getenv("DATABASE_HOST")
+port = int(os.getenv("DATABASE_PORT", "5432"))
+dbname = os.getenv("DATABASE_NAME", "postgres")
+user = os.getenv("DATABASE_USER")
+password = os.getenv("DATABASE_PASSWORD")
 
 class SupabaseVectorDB:
-    """Minimal adapter for a Supabase-backed vector DB.
+    instance = None
+    connection = None
 
-    This is a lightweight stub to provide a consistent import and a graceful
-    fallback when the `supabase` client or configuration is not available.
+    def __new__(cls, table: str = "documents"):
+        if not cls.instance:
+            cls.instance = super(SupabaseVectorDB, cls).__new__(cls)
+            cls.instance._connect()
+        return cls.instance
+    
 
-    It implements `similarity_search(query, top_k)` and returns a list of
-    dict-like results with a `text_content` key to match callers in this repo.
-    """
-
-    def __init__(self, table: str = "documents"):
-        self.url = os.getenv("SUPABASE_URL") or os.getenv("DATABASE_URL")
-        self.key = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY")
-        self.table = table
-        self.client = None
-
+    def _connect(self):        
         try:
-            from supabase import create_client
+            if not self.connection:
+                self.connection = psycopg.connect(
+                    host=host,
+                    port=port,
+                    dbname=dbname,
+                    user=user,
+                    password=password
+                )
+                self.connection.autocommit = True
+        except Exception as e:
+            self.__del__()
+            print(f"Error connecting to the database: {e}")
+            
 
-            if self.url and self.key:
-                self.client = create_client(self.url, self.key)
-        except Exception:
-            # supabase package not installed or failed to import; keep client None
-            self.client = None
 
+    def __del__(self):
+        if self.connection:
+            self.connection.close()
+            self.connection = None        
+            
     def similarity_search(self, query: str, top_k: int = 3) -> List[Dict]:
-        """Perform a similarity search and return results in the form:
+        """Return the closest rows for a vector embedding query.
 
-        [{"text_content": "..."}, ...]
-
-        If the Supabase client isn't configured, return an empty list so callers
-        can handle the "I don't know" path gracefully.
+        This version uses psycopg 3 only. The `query` argument must already be
+        an embedding vector string or be replaced with your embedding-generation
+        step before calling this method.
         """
-
+        self._connect()
+        assert self.connection is not None
+        dims = 1536
+        embedding_string = query
+        query_sql = sql.SQL(
+            """
+            SELECT text_content, metadata
+            FROM FQA_embedding
+            ORDER BY embedding <-> {embedding}
+            LIMIT {limit};
+            """
+        ).format(
+            embedding=sql.Literal(embedding_string),
+            limit=sql.Literal(top_k),
+        )
         try:
-            # This is intentionally generic: different schemas or Supabase setups
-            # will require custom queries. Implementers can replace this with a
-            # project-specific vector search (RPC or vector extension queries).
-            # For now, attempt a simple select as a placeholder.
-            resp = (
-                self.client
-                .table(self.table)
-                .select("*")
-                .limit(top_k)
-                .execute()
-            )
-
-            data = resp.data if hasattr(resp, "data") else resp
-            results = []
-            for row in data or []:
-                text = None
-                if isinstance(row, dict):
-                    # Prefer common keys
-                    text = row.get("text") or row.get("content") or row.get("body") or row.get("text_content")
-                if text is None:
-                    # Fallback to stringifying the row
-                    text = str(row)
-                results.append({"text_content": text})
-
-            return results
-
-        except Exception:
+            with self.connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(query_sql)
+                results = cursor.fetchall()
+                return results
+        except Exception as e:
+            print(f"Error during similarity search: {e}")
             return []
